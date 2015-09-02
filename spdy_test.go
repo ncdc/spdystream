@@ -3,6 +3,7 @@ package spdystream
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -875,6 +876,107 @@ func TestFramingAfterRemoteConnectionClosed(t *testing.T) {
 
 	stream.Reset()
 	conn.Close()
+}
+
+func TestGoAwayRace(t *testing.T) {
+	testFunc := func() {
+		listener, err := net.Listen("tcp", "localhost:0")
+		if err != nil {
+			t.Fatalf("Error listening: %v", err)
+		}
+		listen := listener.Addr().String()
+
+		serverConnChan := make(chan *Connection)
+		go func() {
+			serverConn, err := listener.Accept()
+			if err != nil {
+				t.Fatalf("Error accepting: %v", err)
+			}
+
+			serverSpdyConn, err := NewConnection(serverConn, true)
+			if err != nil {
+				t.Fatalf("Error creating server connection: %v", err)
+			}
+			serverConnChan <- serverSpdyConn
+
+			streamCh := make(chan *Stream)
+			go serverSpdyConn.Serve(func(s *Stream) {
+				s.SendReply(http.Header{}, false)
+				streamCh <- s
+			})
+
+			for {
+				stream, ok := <-streamCh
+				if !ok {
+					break
+				}
+				go func(stream *Stream) {
+					defer stream.Close()
+					io.Copy(stream, stream)
+				}(stream)
+			}
+		}()
+
+		dialConn, err := net.Dial("tcp", listen)
+		if err != nil {
+			t.Fatalf("Error dialing server: %s", err)
+		}
+		conn, err := NewConnection(dialConn, false)
+		if err != nil {
+			t.Fatalf("Error creating client connectin: %v", err)
+		}
+		defer conn.Close()
+		go conn.Serve(NoOpStreamHandler)
+
+		serverConn := <-serverConnChan
+		defer serverConn.Close()
+
+		var wg sync.WaitGroup
+
+		for i := 0; i < 10; i++ {
+			fmt.Println("Creating stream", i)
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				stream, err := conn.CreateStream(http.Header{}, nil, false)
+				if err != nil {
+					t.Fatalf("error creating client stream: %s", err)
+				}
+				defer stream.Close()
+
+				for j := 0; j < 1; j++ {
+					fmt.Printf("Stream %d round %d\n", i, j)
+					n, err := stream.Write([]byte("hello"))
+					if err != nil {
+						t.Fatalf("error writing to stream: %s", err)
+					}
+					if n != 5 {
+						t.Fatalf("Expected to write 5 bytes, but actually wrote %d", n)
+					}
+
+					b := make([]byte, 5)
+					n, err = stream.Read(b)
+					if err != nil {
+						t.Fatalf("error reading from stream: %s", err)
+					}
+					if n != 5 {
+						t.Fatalf("Expected to read 5 bytes, but actually read %d", n)
+					}
+					if e, a := "hello", string(b[0:n]); e != a {
+						t.Fatalf("expected '%s', got '%s'", e, a)
+					}
+				}
+			}(i)
+		}
+
+		wg.Wait()
+
+	}
+
+	for i := 0; i < 100; i++ {
+		fmt.Println("Starting test", i)
+		testFunc()
+	}
 }
 
 var authenticated bool
