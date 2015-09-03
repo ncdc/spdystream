@@ -911,7 +911,7 @@ func TestGoAwayRace(t *testing.T) {
 					break
 				}
 				go func(stream *Stream) {
-					defer stream.Close()
+					//defer stream.Close()
 					io.Copy(stream, stream)
 				}(stream)
 			}
@@ -933,7 +933,7 @@ func TestGoAwayRace(t *testing.T) {
 
 		var wg sync.WaitGroup
 
-		for i := 0; i < 10; i++ {
+		for i := 0; i < 3; i++ {
 			fmt.Println("Creating stream", i)
 			wg.Add(1)
 			go func(i int) {
@@ -944,7 +944,7 @@ func TestGoAwayRace(t *testing.T) {
 				}
 				defer stream.Close()
 
-				for j := 0; j < 1; j++ {
+				for j := 0; j < 100; j++ {
 					fmt.Printf("Stream %d round %d\n", i, j)
 					n, err := stream.Write([]byte("hello"))
 					if err != nil {
